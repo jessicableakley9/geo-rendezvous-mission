@@ -1,0 +1,812 @@
+## MATLAB Code for Misison
+clc
+clear
+close all
+
+%% Given:
+muEarth = 398600; %km^3/s^2
+rEarth = 6378; %km  
+% HOT BIRD TLE:
+inc_tle = 0.0495; %degrees
+ecc_tle = 0.0002113;
+RAAN_tle = 234.5275; %degrees
+w_tle = 302.7558; %degree
+Me_tle = 81.6552; %degrees, Mean Anomaly
+n_tle = 1.00271479/24/60/60; % rev/sec, mean motion
+[rECI0, vECI0, ~, ~, targetP] = tle2rv(n_tle, ecc_tle, Me_tle, inc_tle, RAAN_tle, w_tle);
+r0 = rECI0;
+v0 = vECI0;
+hotbirdPeriodDays = targetP/60/60/24; % days
+disp("The period of Hot Bird in days is " + hotbirdPeriodDays)
+[a, ~, targetTA, ~, ~, ~, ~, ~, ~, ~] = rv2coeE(rECI0,vECI0);
+n = 2*pi / targetP; % rads/s
+
+% Chaser initial position in LVLH:
+y0 = 100;
+rC_LVLH0 = [0; y0; 0];
+vC_LVLH0 = [0; 0; 0];
+
+% RM from ECI to LVLH:
+[T0, ~, ~] = ECI2RSW(r0, v0);   % ECI -> RSW
+R = T0.';                       % RSW -> ECI
+
+% Instantaneous LVLH angular rate (consistent with the state)
+h_lvlh = norm(cross(r0, v0)) / norm(r0)^2;    % 1/s
+
+% Build chaser ECI state from LVLH offset & velocity
+rChaserECI0 = r0 + R * rC_LVLH0;
+Omega_LVLH = [0; 0; h_lvlh];                  % rad/s in LVLH
+vChaserECI0 = v0 + R * ( vC_LVLH0 + cross(Omega_LVLH, rC_LVLH0) );
+initRelDist = norm(r0 - rChaserECI0);
+disp("The initial relative position of the Chaser to Hot Bird is " + initRelDist + " km")
+
+%% Hop to 40 km:
+disp(" ")
+disp("Hop #1:")
+% hop takes 1 whole period
+t1 = targetP; % s
+ 
+% Target 40 km away:
+y_target = -40; % km
+DeltaY = y_target - y0;   %
+hop1DeltaV = (DeltaY * n)/(-6*pi);   % km/s
+dellV1_hold1 = [0; hop1DeltaV; 0];    % first burn at t=0 in LVLH
+dellV1_hold2 = (-1)*dellV1_hold1; % equal and opposite to get off
+Total_deltaV_Hop1 = norm((2*hop1DeltaV))*1000; % m/s
+disp("The delta-V needed to move within 40 km is " + Total_deltaV_Hop1 + " m/s")
+
+tspanHop1 = [0 t1];
+options = odeset('RelTol',1e-8,'AbsTol',1e-8);
+initStates = [rC_LVLH0; dellV1_hold1; r0; v0];
+[~, Hop1States] = ode45(@(t,y) Circ_LinearizedEoM(t, y, muEarth, n), ...
+    tspanHop1, initStates, options);
+
+% Hop 1 in LVLH:
+figure
+plot(Hop1States(:,2), Hop1States(:,1), 'r', 'LineWidth', 2)
+legend('Hop from 100 km to 40 km', 'FontSize', 12, 'FontWeight', 'bold')
+title('Hop #1 in LVLH', 'FontSize', 12, 'FontWeight', 'bold')
+xlabel('downrange [km]', 'FontSize', 12, 'FontWeight', 'bold')
+ylabel('altitude [km]', 'FontSize', 12, 'FontWeight', 'bold')
+grid on
+axis equal
+
+% Hop in ECI:
+hot0ECIstate = [r0; v0];
+chaser0_LVLHState = [rC_LVLH0; dellV1_hold1];
+[rC1_ECI, vC1_ECI] = LVLH_2_ECI_state(hot0ECIstate, chaser0_LVLHState);
+chaser0_ECIstate = [rC1_ECI; vC1_ECI];
+[~, rC_ECI_hop1] = ode45(@(t,y) twobodymotion(t, y, muEarth), tspanHop1, chaser0_ECIstate, options);
+
+% Propagate target:
+tleState = [r0; v0];
+tleP = [0; targetP]; % s
+[~, hotBird_h1] = ode45(@(t,y) twobodymotion(t,y,muEarth), tleP, tleState, options);
+
+% Plot the trajectory of the chaser in ECI
+figure
+plot(hotBird_h1(:,1), hotBird_h1(:,2), 'r', 'LineWidth', 2)
+hold on
+plot(hotBird_h1(1,1), hotBird_h1(1,2),'go', 'MarkerSize', 8, 'MarkerFaceColor', 'r')
+plot(rC_ECI_hop1(:,1), rC_ECI_hop1(:,2), 'b--', 'LineWidth', 2)
+plot(rC1_ECI(1), rC1_ECI(2), 'go', 'MarkerSize', 8, 'MarkerFaceColor', 'k')
+legend('Hot Bird Trajectory', 'Hot Bird Starting Position','Chaser Trajectory', 'Chaser Starting Position', 'FontSize', 12, 'FontWeight', 'bold')
+title('Chaser Trajectory in ECI', 'FontSize', 12, 'FontWeight', 'bold')
+xlabel('x [km]', 'FontSize', 12, 'FontWeight', 'bold')
+ylabel('y [km]', 'FontSize', 12, 'FontWeight', 'bold')
+grid on
+axis equal
+
+% Chaser after second burn in LVLH:
+Hop1States_postBurn2 = Hop1States(end,4:6).' + dellV1_hold2; % burn to get off
+birdECI_postHop1 = hotBird_h1(end,1:6).';   % column
+
+% Chaser ECI state at t = T after applying second burn
+relPos_postHop1 = Hop1States(end,1:3).';              % 3x1
+chaserLVLH_postHop1 = [relPos_postHop1; Hop1States_postBurn2];  % 6x1
+[rC_hop1, ~] = LVLH_2_ECI_state(birdECI_postHop1, chaserLVLH_postHop1);
+
+% Relative distance after 1st hold
+HopRelDist = norm(hotBird_h1(end,1:3).' - rC_hop1);
+disp("The relative position of the Chaser to Hot Bird after the 1st hop is " + HopRelDist + " km")
+hopTime1 = targetP; % s
+hopTime1_days = hopTime1/60/60/24; % days
+disp("Time of mission after first hop: " + hopTime1_days + " days")
+
+%% Hold 1: Football at ~40 km
+disp(" ")
+disp("Hold 1: Football at 40 km")
+vChaser_LVLH_postHop1 = Hop1States_postBurn2;
+rChaser_LVLH_postHop1 = Hop1States(end,1:3)';
+
+% hold for 1 period
+footballTime1 = targetP; % s
+footballTime1days = footballTime1/60/60/24; % days
+
+% Find burn in x direction
+y0_fb = rChaser_LVLH_postHop1(2,1);
+fbDeltaX = y0_fb*n; % km/s
+dellV1_fb1 = [fbDeltaX; 0; 0];    % first burn
+dellV2_fb1 = (-1)*dellV1_fb1; % equal and opposite to get off
+Total_deltaV_fb1 = norm((2*fbDeltaX))*1000; % m/s
+disp("The delta-V needed for a football hold for " + footballTime1days + " days is " + Total_deltaV_fb1 + " m/s")
+
+% Football Maneuver in LVLH:
+tspan_fb1 = [0 footballTime1];
+init_fbStates = [rChaser_LVLH_postHop1; dellV1_fb1 + vChaser_LVLH_postHop1; birdECI_postHop1];
+[~, fbStates] = ode45(@(t,y) Circ_LinearizedEoM(t, y, muEarth, n), ...
+    tspan_fb1, init_fbStates, options);
+
+% Football in LVLH:
+figure
+plot(fbStates(:,2), fbStates(:,1), 'r', 'LineWidth', 2)
+hold on
+plot(fbStates(end,2), fbStates(end,1), 'go', 'MarkerSize', 8, 'MarkerFaceColor', 'r')
+legend('Football Hold 1','Starting and Ending Position' , 'FontSize', 12, 'FontWeight', 'bold')
+title('Hold #1 in LVLH', 'FontSize', 12, 'FontWeight', 'bold')
+xlabel('downrange [km]', 'FontSize', 12, 'FontWeight', 'bold')
+ylabel('altitude [km]', 'FontSize', 12, 'FontWeight', 'bold')
+grid on
+axis equal
+
+% Football hold in ECI:
+bird_hold1ECI = birdECI_postHop1;
+chaser0_LVLHState = [rChaser_LVLH_postHop1; dellV1_fb1 + vChaser_LVLH_postHop1];
+[rC_hold1_ECI, vC_hold1_ECI] = LVLH_2_ECI_state(bird_hold1ECI, chaser0_LVLHState);
+chaser_hold1_ECIstate = [rC_hold1_ECI; vC_hold1_ECI];
+[~, rC_ECI_hold1States] = ode45(@(t,y) twobodymotion(t, y, muEarth), tspan_fb1, chaser_hold1_ECIstate, options);
+[~, hotBird_hold1States] = ode45(@(t,y) twobodymotion(t,y,muEarth), tspan_fb1, bird_hold1ECI, options);
+
+% Plot the trajectory of the chaser in ECI during Football hold
+figure
+plot(hotBird_hold1States(:,1), hotBird_hold1States(:,2), 'r', 'LineWidth', 2)
+hold on
+plot(hotBird_hold1States(end,1), hotBird_hold1States(end,2),'go', 'MarkerSize', 8, 'MarkerFaceColor', 'r')
+plot(rC_ECI_hold1States(:,1), rC_ECI_hold1States(:,2), 'b--', 'LineWidth', 2)
+plot(rC_ECI_hold1States(end,1), rC_ECI_hold1States(end,2), 'go', 'MarkerSize', 8, 'MarkerFaceColor', 'k')
+legend('Hot Bird Trajectory', 'Hot Bird Ending Position','Chaser Trajectory', 'Chaser Ending Position', 'FontSize', 12, 'FontWeight', 'bold')
+title('Chaser Trajectory in ECI during Football Hold', 'FontSize', 12, 'FontWeight', 'bold')
+xlabel('x [km]', 'FontSize', 12, 'FontWeight', 'bold')
+ylabel('y [km]', 'FontSize', 12, 'FontWeight', 'bold')
+grid on
+axis equal
+
+% Chaser after second burn to get off football hold in LVLH:
+Hold1States_postBurn2 = fbStates(end,4:6).' + dellV2_fb1; % burn to get off
+birdECI_postHold1 = hotBird_hold1States(end,1:6).';   % column
+relPos_postHold1 = fbStates(end,1:3).';            
+chaserLVLH_postHop1 = [relPos_postHold1; Hold1States_postBurn2];
+[rC_hold1, ~] = LVLH_2_ECI_state(birdECI_postHold1, chaserLVLH_postHop1);
+
+HopRelDist = norm(hotBird_hold1States(end,1:3).' - rC_hold1);
+disp("The relative position of the Chaser to Hot Bird after the football hold is " + HopRelDist + " km")
+postHold1_time = hopTime1 + footballTime1;
+postHold1_time_days = postHold1_time/60/60/24; % days
+disp("Time of mission after first hold: " + postHold1_time_days + " days")
+
+%% Hop 2: move within ~1 km
+disp(' ')
+disp('Hop #2 to be ~1 km away')
+
+% start of hop 2 = end of football hold
+rC_LVLH0_h2 = relPos_postHold1;
+vC_LVLH0_h2 = Hold1States_postBurn2; % ~0
+chiefECI_h2_0 = birdECI_postHold1;
+
+% along track target
+y_target2 = -1; %km (behind)
+y1 = rC_LVLH0_h2(2);
+%y1 = 0;
+DeltaY2 = y_target2 - y1;
+
+hop2DeltaV = (DeltaY2 * n)/(-6*pi); % km/s
+dV2_hop_start = [0; hop2DeltaV; 0];
+dV2_hop_end = -dV2_hop_start; % equal & opposite
+Total_deltaV_Hop2 = norm(2*hop2DeltaV) * 1000; % m/s
+disp(['The total delta V needed for hop 2 is ', num2str(Total_deltaV_Hop2), ' m/s'])
+
+% propagate hop 2 for 1 period
+t2 = targetP; %s
+tspanHop2 = [0 t2];
+initStates_h2 = [rC_LVLH0_h2; vC_LVLH0_h2 + dV2_hop_start; chiefECI_h2_0];
+[time_h2, hop2States] = ode45(@(t,y) Circ_LinearizedEoM(t, y, muEarth, n), tspanHop2, initStates_h2, options);
+
+% plot the hop in LVLH
+figure
+plot(hop2States(:,2), hop2States(:,1), 'LineWidth', 2)
+grid on
+axis equal
+xlabel('downrange [km]', 'FontSize', 12, 'FontWeight', 'bold')
+ylabel('altitude [km]', 'FontSize', 12, 'FontWeight', 'bold')
+title('Hop #2 in LVLH', 'FontSize', 12, 'FontWeight', 'bold')
+legend('Hop from ~-40 km to ~-1 km')
+
+% eci prop
+[rC2_ECI0, vC2_ECI0] = LVLH_2_ECI_state(chiefECI_h2_0, [rC_LVLH0_h2; vC_LVLH0_h2 + dV2_hop_start]);
+chaserECI_h2_0 = [rC2_ECI0; vC2_ECI0];
+[~, rC_ECI_hop2] = ode45(@(t,y) twobodymotion(t, y, muEarth), tspanHop2, chaserECI_h2_0, options);
+[~, hotBird_h2]  = ode45(@(t,y) twobodymotion(t, y, muEarth), tspanHop2, chiefECI_h2_0, options);
+
+% eci prop plot
+figure
+plot(hotBird_h2(:,1), hotBird_h2(:,2), 'r', 'LineWidth', 2); hold on
+plot(hotBird_h2(1,1), hotBird_h2(1,2), 'go', 'MarkerSize', 8, 'MarkerFaceColor', 'r')
+plot(rC_ECI_hop2(:,1), rC_ECI_hop2(:,2), 'b--', 'LineWidth', 2)
+plot(rC2_ECI0(1), rC2_ECI0(2), 'go', 'MarkerSize', 8, 'MarkerFaceColor', 'k')
+grid on
+axis equal
+xlabel('x [km]', 'FontSize', 12, 'FontWeight', 'bold')
+ylabel('y [km]', 'FontSize', 12, 'FontWeight', 'bold')
+title('Chaser Trajectory in ECI (Hop #2)', 'FontSize', 12, 'FontWeight', 'bold')
+legend('Hot Bird Trajectory', 'Hot Bird Start', 'Chaser Trajectory', 'Chaser Start', 'FontSize', 12, 'FontWeight', 'bold')
+
+% end burn to stop rel motion for new hold
+vRel_end_h2 = hop2States(end,4:6).';
+vRel_end_h2_post = vRel_end_h2 + dV2_hop_end; %km/s
+relPos_T2 = hop2States(end,1:3).'; %km
+chiefECI_T2 = hotBird_h2(end,1:6).'; %eci of chief at t = T
+[rC_hop2, ~] = LVLH_2_ECI_state(chiefECI_T2, [relPos_T2; vRel_end_h2_post]);
+
+Hop2RelDist = norm(chiefECI_T2(1:3) - rC_hop2); %km
+disp(['The relative position after the second hop is ', num2str(Hop2RelDist), ' km'])
+
+mission_time_after_hop2_days = (postHold1_time + t2)/86400;
+disp(['The time of the mission after the second hop is ', num2str(mission_time_after_hop2_days), ' days'])
+
+%% Hold 2: v-bar station keeping at ~1 km
+disp(' ')
+disp('Hold 2: vBar station keeping (at ~1 km)')
+
+vbarTime2 = targetP; % s
+Total_deltaV_vBar2 = 0; % idealized
+disp("The delta-V needed for a Vbar Hold Maneuver (idealized) is " + Total_deltaV_vBar2 + " m/s")
+disp("In non-ideal cases, v-bar station keeping uses small continuous corrections.")
+
+tspan_vBar2 = [0 vbarTime2];
+initStates_vBar2 = [relPos_T2; vRel_end_h2_post; chiefECI_T2];
+[~, vBar2States] = ode45(@(t,y) Circ_LinearizedEoM(t, y, muEarth, n), tspan_vBar2, initStates_vBar2, options);
+
+% LVLH plot
+figure
+plot(vBar2States(:,2), vBar2States(:,1), 'r', 'LineWidth', 2); hold on
+plot(vBar2States(1,2),  vBar2States(1,1),  'go', 'MarkerSize', 8, 'MarkerFaceColor', 'r')
+plot(vBar2States(end,2), vBar2States(end,1),'kx', 'MarkerSize', 10, 'LineWidth', 2)
+grid on
+title('Hold #2 in LVLH (vBar at ~1 km)','FontSize',12,'FontWeight','bold')
+xlabel('downrange [km]','FontSize',12,'FontWeight','bold')
+ylabel('altitude [km]','FontSize',12,'FontWeight','bold')
+legend('Chaser Trajectory','Start','End','Location','best')
+axis equal
+
+% ECI visualization
+[rC_vBar2_ECI0, vC_vBar2_ECI0] = LVLH_2_ECI_state(chiefECI_T2, [relPos_T2; vRel_end_h2_post]);
+chaser_vBar2_ECI0 = [rC_vBar2_ECI0; vC_vBar2_ECI0];
+[~, rC_ECI_vBar2] = ode45(@(t,y) twobodymotion(t, y, muEarth), tspan_vBar2, chaser_vBar2_ECI0, options);
+[~, hotBird_vBar2] = ode45(@(t,y) twobodymotion(t, y, muEarth), tspan_vBar2, chiefECI_T2, options);
+
+figure
+plot(hotBird_vBar2(:,1), hotBird_vBar2(:,2), 'r','LineWidth',2); hold on
+plot(hotBird_vBar2(end,1), hotBird_vBar2(end,2), 'go', 'MarkerSize',8, 'MarkerFaceColor','r')
+plot(rC_ECI_vBar2(:,1), rC_ECI_vBar2(:,2), 'b--','LineWidth',2)
+plot(rC_vBar2_ECI0(1), rC_vBar2_ECI0(2), 'go', 'MarkerSize',8, 'MarkerFaceColor','k')
+grid on; axis equal
+xlabel('x [km]','FontSize',12,'FontWeight','bold')
+ylabel('y [km]','FontSize',12,'FontWeight','bold')
+title('Chaser Trajectory in ECI during vBar Hold #2','FontSize',12,'FontWeight','bold')
+legend('Hot Bird','Hot Bird End','Chaser','Chaser Start','Location','best')
+
+% Post-hold state for next leg
+Hold2States_postBurn2 = vBar2States(end,4:6).';
+birdECI_postHold2 = hotBird_vBar2(end,1:6).';
+relPos_postHold2 = vBar2States(end,1:3).';
+chaserLVLH_postHold2 = [relPos_postHold2; Hold2States_postBurn2];
+rC_hold2_eci = LVLH_2_ECI_state(birdECI_postHold2, chaserLVLH_postHold2);
+Hold2RelDist_km = norm(birdECI_postHold2(1:3) - rC_hold2_eci);
+disp(['The relative position after vBar Hold #2 is ', num2str(Hold2RelDist_km), ' km'])
+
+mission_time_after_hold2_days = (postHold1_time + t2 + vbarTime2)/86400;
+disp(['Mission time after Hold 2 (vBar): ', num2str(mission_time_after_hold2_days), ' days'])
+
+%% Hop 3: from ~1 km to 300 m (START FROM HOLD 2 OUTPUTS)
+disp(" ")
+disp("Hop #3:")
+
+t3 = targetP; % s
+
+% Start Hop #3 from post Hold 2 (vBar):
+hot3ECIstate = birdECI_postHold2; % target ECI after Hold 2
+relPos_start_h3 = relPos_postHold2; % LVLH position after Hold 2
+vRel_start_h3 = Hold2States_postBurn2; % LVLH velocity after Hold 2
+
+% Target 300 m away:
+y3       = relPos_start_h3(2); % km
+y_target = 0.3; % km
+DeltaY3  = y_target - y3;
+hop3DeltaV = (DeltaY3 * n)/(-6*pi); % km/s
+dellV3_hold1 = [0; hop3DeltaV; 0];    % first burn at t=0 in LVLH
+dellV3_hold2 = -dellV3_hold1; % equal & opposite
+Total_deltaV_Hop3 = norm(2*hop3DeltaV)*1000; % m/s
+disp("The delta-V needed to move within 300 m is " + Total_deltaV_Hop3 + " m/s")
+
+tspanHop3 = [0 t3];
+initStates3 = [relPos_start_h3; (vRel_start_h3 + dellV3_hold1); hot3ECIstate];
+[~, Hop3States] = ode45(@(t,y) Circ_LinearizedEoM(t, y, muEarth, n), tspanHop3, initStates3, options);
+
+% Hop 3 in LVLH:
+figure
+plot(Hop3States(:,2), Hop3States(:,1), 'r', 'LineWidth', 2)
+hold on
+plot(Hop3States(1,2), Hop3States(1,1),'go', 'MarkerSize', 8, 'MarkerFaceColor', 'r')
+legend('Hop from ~1 km to 300 m', 'FontSize', 12, 'FontWeight', 'bold')
+title('Hop #3 in LVLH', 'FontSize', 12, 'FontWeight', 'bold')
+xlabel('downrange [km]', 'FontSize', 12, 'FontWeight', 'bold')
+ylabel('altitude [km]', 'FontSize', 12, 'FontWeight', 'bold')
+grid on
+axis equal
+
+% Hop 3 in ECI:
+chaser3_LVLHState = [relPos_start_h3; (vRel_start_h3 + dellV3_hold1)];
+[rC3_ECI, vC3_ECI] = LVLH_2_ECI_state(hot3ECIstate, chaser3_LVLHState);
+chaser3_ECIstate = [rC3_ECI; vC3_ECI];
+[~, Chaser_ECI_hop3] = ode45(@(t,y) twobodymotion(t, y, muEarth), tspanHop3, chaser3_ECIstate, options);
+[~, hotBird_h3] = ode45(@(t,y) twobodymotion(t,y,muEarth), tspanHop3, hot3ECIstate, options);
+
+% Plot ECI
+figure
+plot(hotBird_h3(:,1), hotBird_h3(:,2), 'r', 'LineWidth', 2)
+hold on
+plot(hotBird_h3(end,1), hotBird_h3(end,2),'go', 'MarkerSize', 8, 'MarkerFaceColor', 'r')
+plot(Chaser_ECI_hop3(:,1), Chaser_ECI_hop3(:,2), 'b--', 'LineWidth', 2)
+plot(rC3_ECI(1), rC3_ECI(2), 'go', 'MarkerSize', 8, 'MarkerFaceColor', 'k')
+legend('Hot Bird Trajectory', 'Hot Bird Starting Position','Chaser Trajectory', 'Chaser Starting Position', 'FontSize', 12, 'FontWeight', 'bold')
+title('Chaser Trajectory in ECI', 'FontSize', 12, 'FontWeight', 'bold')
+xlabel('x [km]', 'FontSize', 12, 'FontWeight', 'bold')
+ylabel('y [km]', 'FontSize', 12, 'FontWeight', 'bold')
+grid on
+axis equal
+
+% Chaser after second burn in LVLH:
+Hop3States_postBurn2 = Hop3States(end,4:6).' + dellV3_hold2; % burn to get off
+birdECI_postHop3 = hotBird_h3(end,1:6).';   % column
+relPos_postHop3 = Hop3States(end,1:3).';              % 3x1
+chaserLVLH_postHop3 = [relPos_postHop3; Hop3States_postBurn2];  % 6x1
+[rC_hop3, vC_hop3] = LVLH_2_ECI_state(birdECI_postHop3, chaserLVLH_postHop3);
+Hop3RelDist = norm(hotBird_h3(end,1:3).' - rC_hop3)*1000;
+disp("The relative position of the Chaser to Hot Bird after the 3rd hop is " + Hop3RelDist + " m")
+
+hopTime3 = targetP; % s
+hopTime3_days = hopTime3/60/60/24 + mission_time_after_hold2_days; % days
+disp("Time of mission after the third hop: " + hopTime3_days + " days")
+
+%% Hold 3: v-bar station keeping at 300 m (UNCHANGED TYPE)
+disp(" ")
+disp("Hold #3: vBar station keeping")
+
+vbarTime = targetP; % s
+Total_deltaV_vBar = 0; % m/s idealized
+disp("The delta-V needed for a Vbar Hold Maneuver is " + Total_deltaV_vBar + " m/s")
+disp("In non-ideal cases, a v-bar station keeping maneuver will do constant burn corrections.")
+
+tspan_vBar = [0 vbarTime];
+hotVbar_ECIstate = birdECI_postHop3;
+initStates_vBar = [chaserLVLH_postHop3; hotVbar_ECIstate];
+[~, vBarStates] = ode45(@(t,y) Circ_LinearizedEoM(t, y, muEarth, n), tspan_vBar, initStates_vBar, options);
+
+% vBar Hold in LVLH:
+figure
+plot(vBarStates(:,2), vBarStates(:,1), 'r', 'LineWidth', 2)
+hold on
+plot(vBarStates(1,2), vBarStates(1,1),'go', 'MarkerSize', 8, 'MarkerFaceColor', 'r')
+plot(vBarStates(end,2), vBarStates(end,1),'kx', 'MarkerSize', 10, 'LineWidth', 2, 'MarkerFaceColor', 'k')
+legend('Chaser Trajectory','Start','End', 'FontSize', 12, 'FontWeight', 'bold')
+title('vBar Hold in LVLH', 'FontSize', 12, 'FontWeight', 'bold')
+xlabel('downrange [km]', 'FontSize', 12, 'FontWeight', 'bold')
+ylabel('altitude [km]', 'FontSize', 12, 'FontWeight', 'bold')
+grid on
+
+% vBar in ECI:
+chaser_vBar_LVLHState = [relPos_postHop3; Hop3States_postBurn2];
+[rC_vBar_ECI, vC_vBar_ECI] = LVLH_2_ECI_state(hotVbar_ECIstate, chaser_vBar_LVLHState);
+chaser_hold3_ECIstate = [rC_vBar_ECI; vC_vBar_ECI];
+[~, Chaser_ECI_hold3] = ode45(@(t,y) twobodymotion(t, y, muEarth), tspan_vBar, chaser_hold3_ECIstate, options);
+[~, hotBird_hold3] = ode45(@(t,y) twobodymotion(t,y,muEarth), tspan_vBar, hotVbar_ECIstate, options);
+
+% Plot in ECI
+figure
+plot(hotBird_hold3(:,1), hotBird_hold3(:,2), 'r', 'LineWidth', 2)
+hold on
+plot(hotBird_hold3(end,1), hotBird_hold3(end,2),'go', 'MarkerSize', 8, 'MarkerFaceColor', 'r')
+plot(Chaser_ECI_hold3(:,1), Chaser_ECI_hold3(:,2), 'b--', 'LineWidth', 2)
+plot(rC_vBar_ECI(1), rC_vBar_ECI(2), 'go', 'MarkerSize', 8, 'MarkerFaceColor', 'k')
+legend('Hot Bird Trajectory', 'Hot Bird Starting Position','Chaser Trajectory', 'Chaser Starting Position', 'FontSize', 12, 'FontWeight', 'bold')
+title('Chaser vBar Trajectory in ECI', 'FontSize', 12, 'FontWeight', 'bold')
+xlabel('x [km]', 'FontSize', 12, 'FontWeight', 'bold')
+ylabel('y [km]', 'FontSize', 12, 'FontWeight', 'bold')
+grid on
+axis equal
+
+% Post-hold state
+Hold3States_postBurn2 = vBarStates(end,4:6).';
+birdECI_postHold3 = hotBird_hold3(end,1:6).';  
+relPos_postHold3 = vBarStates(end,1:3).';           
+chaserLVLH_postHold3 = [relPos_postHold3; Hold3States_postBurn2];  
+[rC_hold3_eci, vC_hold3_eci] = LVLH_2_ECI_state(birdECI_postHold3, chaserLVLH_postHold3);
+Hold3RelDist = norm(hotBird_hold3(end,1:3).' - rC_hold3_eci)*1000;
+disp("The relative position of the Chaser to Hot Bird after vBar Hold #3 is " + Hold3RelDist + " m")
+
+% mission time after Hold 3
+hold4Time_days = vbarTime/60/60/24 + hopTime3_days; % days
+disp("Time of mission after vBar station keeping (Hold 3): " + hold4Time_days + " days")
+
+%% Hop 4: to 20 m
+disp(' ')
+disp('Hop #4:')
+
+% start from end of hold 3
+rC_LVLH0_h4 = relPos_postHold3; % km
+vC_LVLH0_h4 = Hold3States_postBurn2; % km/s
+chiefECI_h4_0 = birdECI_postHold3; % target eci
+
+% along track separation we want
+y_curr = rC_LVLH0_h4(2); % km
+y_target4 = 0.02; % to 20m (km)
+DeltaY4 = y_target4 - y_curr;
+
+hop4DeltaV = (DeltaY4 * n)/(-6*pi); % km/s
+dV4_hop_start = [0; hop4DeltaV; 0]; % LVLH burn at t=0
+dV4_hop_end = -dV4_hop_start;
+
+Total_deltaV_Hop4 = norm(2*hop4DeltaV) * 1000; % m/s
+disp(['Total deltaV for Hop 4 (to 20 m): ', num2str(Total_deltaV_Hop4), ' m/s'])
+
+% Propagate Hop 4 in LVLH (CW)
+t4 = targetP; % s
+tspanHop4 = [0 t4];
+opts = options;
+initStates_h4 = [rC_LVLH0_h4; vC_LVLH0_h4 + dV4_hop_start; chiefECI_h4_0];
+[time_h4, hop4States] = ode45(@(t,y) Circ_LinearizedEoM(t, y, muEarth, n), tspanHop4, initStates_h4, opts);
+
+% plot LVLH hop
+figure
+plot(hop4States(:,2), hop4States(:,1), 'LineWidth', 2)
+grid on
+axis equal
+xlabel('downrange y [km]','FontSize', 12, 'FontWeight','bold')
+ylabel('radial x [km]','FontSize', 12, 'FontWeight', 'bold')
+title('Hop #4 in LVLH (to 20 m)', 'FontSize', 12, 'FontWeight','bold')
+legend('Hop 300 m to 20 m', 'Location','best')
+
+% end burn to stop rel motion
+vRel_end_h4 = hop4States(end,4:6).';
+vRel_end_h4_post = vRel_end_h4 + dV4_hop_end; % km/s
+relPos_T4 = hop4States(end,1:3).'; % km
+chiefECI_T4 = [hop4States(end,7:12)].'; % target eci at t = T
+
+[rC_hop4, ~] = LVLH_2_ECI_state(chiefECI_T4, [relPos_T4; vRel_end_h4_post]);
+
+Hop4RelDist_km = norm(chiefECI_T4(1:3) - rC_hop4); % km
+disp(['Relative distance after Hop 4 = ', num2str(Hop4RelDist_km*1000), ' m'])
+
+% eci prop and plot
+[rC4_ECI0, vC4_ECI0] = LVLH_2_ECI_state(chiefECI_h4_0, [rC_LVLH0_h4; vC_LVLH0_h4 + dV4_hop_start]);
+chaserECI_h4_0 = [rC4_ECI0; vC4_ECI0];
+[~, rC_ECI_hop4] = ode45(@(t,y) twobodymotion(t, y, muEarth), tspanHop4, chaserECI_h4_0, opts);
+[~, hotBird_h4]  = ode45(@(t,y) twobodymotion(t, y, muEarth), tspanHop4, chiefECI_h4_0, opts);
+
+figure
+plot(hotBird_h4(:,1), hotBird_h4(:,2), 'r','LineWidth',2)
+hold on
+plot(hotBird_h4(1,1), hotBird_h4(1,2), 'go','MarkerSize',8,'MarkerFaceColor','r')
+plot(rC_ECI_hop4(:,1), rC_ECI_hop4(:,2), 'b--','LineWidth',2)
+plot(rC4_ECI0(1), rC4_ECI0(2), 'go','MarkerSize',8,'MarkerFaceColor','k')
+grid on
+axis equal
+xlabel('x [km]', 'FontSize', 12, 'FontWeight','bold')
+ylabel('y [km]', 'FontSize', 12, 'FontWeight','bold')
+title('Chaser Trajectory in ECI (Hop #4 to 20 m)','FontSize',12,'FontWeight','bold')
+legend('Hot Bird Trajectory', 'Hot Bird Start', 'Chaser Trajectory', 'Chaser Start', 'FontSize', 12, 'FontWeight', 'bold')
+
+% mission time after hop 4
+hop4Time_days = t4/60/60/24 + hold4Time_days; % days
+disp("Time of mission after 4th hop: " + hop4Time_days + " days")
+
+%% Hold 4: Oscillating at ~20 m
+disp(' ')
+disp('Hold #4: Oscillating (at ~20 m)')
+
+% Choose cross-track amplitude to match ~20 m box (peak-to-peak)
+Z_amp_km = 0.01;          % 10 m amplitude => ~20 m p2p
+dVz_osc4 = n * Z_amp_km;  % km/s
+
+T_osc4 = targetP;         % 1 orbit
+tspan_osc4 = [0 T_osc4];
+
+dV_osc4_start = [0; 0; dVz_osc4];
+dV_osc4_end   = [0; 0; -dVz_osc4];
+Total_deltaV_osc4 = 2*abs(dVz_osc4)*1000; % m/s
+disp(['Total deltaV for oscillating hold (20 m): ', num2str(Total_deltaV_osc4), ' m/s'])
+
+% Propagate oscillating hold in LVLH (CW)
+initStates_osc4 = [relPos_T4; vRel_end_h4_post + dV_osc4_start; chiefECI_T4];
+[time_osc4, osc4States] = ode45(@(t,y) Circ_LinearizedEoM(t, y, muEarth, n), tspan_osc4, initStates_osc4, options);
+
+% Inspect z(t)
+figure
+plot(time_osc4/3600, osc4States(:,3), 'LineWidth', 2)
+grid on
+xlabel('time [hr]')
+ylabel('cross-track z [km]')
+title('Hold #4: oscillating z(t) for one orbit')
+legend('z(t) = (ΔVz/n)·sin(n t)')
+
+% ECI visualization
+[rC_osc4_ECI0, vC_osc4_ECI0] = LVLH_2_ECI_state(chiefECI_T4, [relPos_T4; vRel_end_h4_post + dV_osc4_start]);
+chaser_osc4_ECI0 = [rC_osc4_ECI0; vC_osc4_ECI0];
+[~, rC_ECI_osc4]  = ode45(@(t,y) twobodymotion(t, y, muEarth), tspan_osc4, chaser_osc4_ECI0, options);
+[~, hotBird_osc4] = ode45(@(t,y) twobodymotion(t, y, muEarth), tspan_osc4, chiefECI_T4,  options);
+
+figure
+plot(hotBird_osc4(:,1), hotBird_osc4(:,2), 'r', 'LineWidth', 2); hold on
+plot(hotBird_osc4(1,1), hotBird_osc4(1,2), 'go','MarkerSize',8,'MarkerFaceColor','r')
+plot(rC_ECI_osc4(:,1), rC_ECI_osc4(:,2), 'b--','LineWidth', 2)
+plot(rC_osc4_ECI0(1),  rC_osc4_ECI0(2),  'go','MarkerSize',8,'MarkerFaceColor','k')
+grid on; axis equal
+xlabel('x [km]','FontSize',12,'FontWeight','bold')
+ylabel('y [km]','FontSize',12,'FontWeight','bold')
+title('Chaser Trajectory in ECI during Oscillating Hold (20 m)','FontSize',12,'FontWeight','bold')
+legend('Hot Bird','Hot Bird Start','Chaser','Chaser Start','Location','best')
+
+% Stop burn at end of hold
+vRel_end_osc4 = osc4States(end,4:6).';
+vRel_end_osc4_post = vRel_end_osc4 + dV_osc4_end;
+relPos_end_osc4 = osc4States(end,1:3).';
+
+chiefECI_postOsc4 = hotBird_osc4(end,1:6).';
+[rC_postOsc4, ~] = LVLH_2_ECI_state(chiefECI_postOsc4, [relPos_end_osc4; vRel_end_osc4_post]);
+
+RelDist_postOsc4_m = norm(chiefECI_postOsc4(1:3) - rC_postOsc4) * 1000;
+disp(['Relative distance after Oscillating Hold (20 m regime): ', num2str(RelDist_postOsc4_m), ' m'])
+
+% Mission time after Hold 4
+osc4Time_days = T_osc4/86400 + hop4Time_days;
+disp("Time of mission after Hold #4 (oscillating): " + osc4Time_days + " days")
+
+%% Coast to hit 10 days total (uses Hold 4 outputs)
+disp(' ')
+disp('Coast')
+
+target_total_days = 10;
+elapsed_before_coast_days = osc4Time_days; % from oscillating hold
+final_leg_days = targetP/86400;
+
+t_coast_days = target_total_days - elapsed_before_coast_days - final_leg_days;
+t_coast = max(t_coast_days, 0) * 86400; % s
+tspan_coast = [0 t_coast];
+
+[~, coastStates] = ode45(@(t,y) Circ_LinearizedEoM(t, y, muEarth, n), tspan_coast, ...
+    [relPos_end_osc4; vRel_end_osc4_post; chiefECI_postOsc4], options);
+
+r_rel0 = coastStates(end,1:3).';
+v_rel0 = coastStates(end,4:6).';
+chiefECI0 = coastStates(end,7:12).';
+
+coast_days = t_coast/86400 + osc4Time_days;
+disp("Mission time after coast: " + coast_days + " days" )
+
+%% Final Approach: V-bar approach to 0 m
+disp(' ')
+disp('Final Approach:')
+format long
+
+% want to be 0 m away
+y_goal_km = 0; % km
+DeltaY = y_goal_km - r_rel0(2); % km
+
+% 1-orbit CW hop to null out to 0 m
+dVy = (DeltaY * n)/(-6*pi); % km/s
+dV0 = [0; dVy; 0]; % burn at start
+dV1 = -dV0;       % burn at end
+dVtot = 2*abs(dVy)*1000; % m/s
+
+disp(['deltaV to get to 0 m: ', num2str(dVtot), ' m/s'])
+
+finaltime = targetP; % s
+tspan_final = [0 finaltime];
+y0_final = [r_rel0; v_rel0 + dV0; chiefECI0];
+
+[~, appStates] = ode45(@(t,y) Circ_LinearizedEoM(t, y, muEarth, n), tspan_final, y0_final, options);
+
+% end burn to stop motion
+v_rel_end = appStates(end,4:6).';
+v_rel_end_post = v_rel_end + dV1; % km/s
+r_rel_end = appStates(end,1:3).'; % km
+chiefECI_end = appStates(end,7:12).'; % eci at end
+
+% lvlh to eci
+[rC_end, ~] = LVLH_2_ECI_state(chiefECI_end, [r_rel_end; v_rel_end_post]);
+relRange_m = norm(chiefECI_end(1:3) - rC_end)*1000; % m
+relSpeed_mps = norm(v_rel_end_post)*1000; % m/s
+disp(['proof of catch - relative distance after approach: ', num2str(relRange_m * 100), ' cm'])
+disp(['relative speed at catch: ', num2str(relSpeed_mps * 100), ' cm/s'])
+disp('wont crash! gentle approach.')
+
+% ECI visualization of final approach
+[rC_app_ECI0, vC_app_ECI0] = LVLH_2_ECI_state(chiefECI0, [r_rel0; v_rel0 + dV0]);
+chaserECI_app0 = [rC_app_ECI0; vC_app_ECI0];
+[~, rC_ECI_app] = ode45(@(t,y) twobodymotion(t, y, muEarth), tspan_final, chaserECI_app0, options);
+[~, hotBird_app] = ode45(@(t,y) twobodymotion(t, y, muEarth), tspan_final, chiefECI0, options);
+
+figure
+plot(hotBird_app(:,1), hotBird_app(:,2), 'r','LineWidth',2)
+hold on
+plot(hotBird_app(1,1), hotBird_app(1,2),'go','MarkerSize',8,'MarkerFaceColor','r')
+plot(rC_ECI_app(:,1), rC_ECI_app(:,2), 'b--','LineWidth',2)
+plot(rC_app_ECI0(1),  rC_app_ECI0(2),'go','MarkerSize',8,'MarkerFaceColor','k')
+grid on
+axis equal
+xlabel('x [km]','FontSize',12,'FontWeight','bold')
+ylabel('y [km]','FontSize',12,'FontWeight','bold')
+title('V-bar Approach to 0 m (ECI)','FontSize',12,'FontWeight','bold')
+legend('Hot Bird','Hot Bird Start','Chaser','Chaser Start','Location','best')
+
+finaltime_days = finaltime/60/60/24 + coast_days; % days
+disp(['final mission time: ', num2str(finaltime_days), ' days'])
+
+%% Frame of Reference:
+%Plot of Target in respect to earth:
+tleState = [r0; v0];
+chase0State = [rChaserECI0; vChaserECI0]; % km , km/s
+tleP = [0; targetP]; % s
+
+options = odeset('RelTol',1e-8,'AbsTol',1e-8);
+
+[plotTime, plotS] = ode45(@(t,y) twobodymotion(t,y,muEarth), tleP, ...
+    tleState, options);
+
+[ChaseTime, ChaseS] = ode45(@(t,y) twobodymotion(t,y,muEarth), tleP, ...
+    chase0State, options);
+
+radius_earth = 6378; % Earth's radius in km
+%sphere representing Earth
+[X, Y, Z] = sphere(50); % Generate points for a unit sphere
+X = radius_earth * X; % Scale to Earth's radius
+Y = radius_earth * Y;
+Z = radius_earth * Z;
+
+figure
+plot3(plotS(:,1), plotS(:,2), plotS(:,3), 'r', 'LineWidth', 2)
+hold on
+plot3(plotS(1,1), plotS(1,2), plotS(1,3),'go', ...
+    'MarkerSize', 8, 'MarkerFaceColor', 'r')
+plot3(ChaseS(:,1), ChaseS(:,2), ChaseS(:,3), 'b', 'LineWidth', 2)
+plot3(ChaseS(1,1), ChaseS(1,2), ChaseS(1,3),'go', 'MarkerSize', 8, ...
+    'MarkerFaceColor', 'b')
+surf(X, Y, Z, 'FaceColor', 'b', 'EdgeColor', 'none', 'FaceAlpha', 0.5)
+legend('Hot Bird Trajectory','Hot Bird Starting Position','Chaser', ...
+    'Chaser Starting Position','Earth', 'FontSize', 12, 'FontWeight', 'bold')
+title('Hot Bird Trajectory relative to Earth in ECI', 'FontSize', 12, 'FontWeight', 'bold')
+xlabel('x [km]', 'FontSize', 12, 'FontWeight', 'bold')
+ylabel('y [km]', 'FontSize', 12, 'FontWeight', 'bold')
+zlabel('z [km]', 'FontSize', 12, 'FontWeight', 'bold')
+grid on
+axis equal
+
+% Zoomed:
+
+figure
+plot(plotS(1:20,1), plotS(1:20,2), 'r', 'LineWidth', 2)
+hold on
+plot(plotS(390:end,1), plotS(390:end,2), 'r', 'LineWidth', 2)
+plot(plotS(1,1), plotS(1,2),'go','MarkerSize', 8, 'MarkerFaceColor', 'r')
+plot(ChaseS(1:20,1), ChaseS(1:20,2), 'b', 'LineWidth', 2)
+plot(ChaseS(390:end,1), ChaseS(390:end,2), 'b', 'LineWidth', 2)
+plot(ChaseS(1,1), ChaseS(1,2),'go', 'MarkerSize', 8, 'MarkerFaceColor', 'b')
+legend('Hot Bird Trajectory','','Hot Bird Starting Position','Chaser Trajectory', ...
+   '', 'Chaser Starting Position', 'FontSize', 12, 'FontWeight', 'bold')
+title('2D Plot of Initial Relative Position of Chaser to Hot Bird', 'FontSize', 12, 'FontWeight', 'bold')
+xlabel('x [km]', 'FontSize', 12, 'FontWeight', 'bold')
+ylabel('y [km]', 'FontSize', 12, 'FontWeight', 'bold')
+grid on
+axis equal
+xlim([-5000 -3500])
+ylim([-42600 -41000])
+
+%% w earth
+figure('Color','w')
+set(gcf,'Renderer','opengl');
+
+radius_earth = 6378; % km
+[xe, ye, ze] = sphere(400);
+xe = radius_earth * xe; 
+ye = radius_earth * ye; 
+ze = radius_earth * ze;
+
+earthFile = 'earth.png';
+img = imread(earthFile);
+img = flipud(img);
+surface(xe, ye, ze,'FaceColor','texturemap', 'CData',img,'EdgeColor','none');
+
+hold on
+axis equal vis3d
+grid on
+view(3)
+
+%% plot target and chaser in 3D
+h1 = plot3(plotS(:,1),  plotS(:,2),  plotS(:,3),  'r-',  'LineWidth',2);
+h2 = plot3(ChaseS(:,1), ChaseS(:,2), ChaseS(:,3), 'b-',  'LineWidth',2);
+
+% Start markers
+plot3(plotS(1,1),  plotS(1,2),  plotS(1,3),  'o', 'MarkerFaceColor','r', 'MarkerEdgeColor','k', 'MarkerSize',6);
+plot3(ChaseS(1,1), ChaseS(1,2), ChaseS(1,3), 'o', 'MarkerFaceColor','b', 'MarkerEdgeColor','k', 'MarkerSize',6);
+
+%ECI axis (?? do we want this)
+L = 1.5 * radius_earth;
+quiver3(0,0,0, L,0,0, 0, 'k','LineWidth',1); text(L*1.02,0,0,'X_{ECI}');
+quiver3(0,0,0, 0,L,0, 0, 'k','LineWidth',1); text(0,L*1.02,0,'Y_{ECI}');
+quiver3(0,0,0, 0,0,L, 0, 'k','LineWidth',1); text(0,0,L*1.02,'Z_{ECI}');
+
+title('Target & Chaser Orbits in ECI with Textured Earth')
+xlabel('x [km]')
+ylabel('y [km]')
+zlabel('z [km]');
+legend([h1 h2], {'Hot Bird Trajectory','Chaser Trajectory'}, 'Location','best')
+
+%% plot w all holds and hops
+figure('Color','w')
+set(gcf,'Renderer','opengl');
+
+% earth
+radius_earth = 6378; % km
+[xe, ye, ze] = sphere(400);
+xe = radius_earth * xe; 
+ye = radius_earth * ye; 
+ze = radius_earth * ze;
+
+earthFile = 'earth.png';
+img = imread(earthFile);
+img = flipud(img);
+surface(xe, ye, ze, 'FaceColor','texturemap', 'CData',img, 'EdgeColor','none');
+
+hold on
+axis equal vis3d
+grid on
+view(3)
+
+%chaser eci, target eci, title for legend
+
+allorbits = {
+    rC_ECI_hop1, hotBird_h1, 'Hop 1 (to 40 km)';
+    rC_ECI_hold1States, hotBird_hold1States,'Hold 1 (Football at 40 km)';
+    rC_ECI_hop2, hotBird_h2, 'Hop 2 (to 1 km)';
+    rC_ECI_vBar2, hotBird_vBar2, 'Hold 2 (v-bar at 1 km)';
+    Chaser_ECI_hop3, hotBird_h3, 'Hop 3 (to 300 m)';
+    Chaser_ECI_hold3, hotBird_hold3, 'Hold 3 (v-bar at 300 m)';
+    rC_ECI_hop4, hotBird_h4, 'Hop 4 (to 20 m)';
+    rC_ECI_osc4, hotBird_osc4, 'Hold 4 (oscillating at 20 m)';
+    rC_ECI_app, hotBird_app, 'Final Approach';
+};
+
+cmap = lines(size(allorbits,1));
+hLeg = gobjects(0); %chaser legend
+
+for k = 1:size(allorbits,1)
+    C = allorbits{k,1}; %chaser eci
+    T = allorbits{k,2}; %target eci
+    %target orbs
+    if ~isempty(T)
+        plot3(T(:,1), T(:,2), T(:,3), '-', 'Color', [0.65 0.65 0.65], 'LineWidth', 0.75);
+    end
+    if ~isempty(C)
+        hk = plot3(C(:,1), C(:,2), C(:,3), '-', 'LineWidth', 2, 'Color', cmap(k,:));
+        hLeg(end+1) = hk;
+        %start marerk
+        plot3(C(1,1), C(1,2), C(1,3), 'o', 'MarkerSize', 6, 'MarkerFaceColor', cmap(k,:), 'MarkerEdgeColor', 'k');
+    end
+end
+
+title('All Hops & Holds in ECI with Textured Earth','FontSize',12,'FontWeight','bold');
+xlabel('x [km]','FontSize',12,'FontWeight','bold');
+ylabel('y [km]','FontSize',12,'FontWeight','bold');
+zlabel('z [km]','FontSize',12,'FontWeight','bold');
+
+legend(hLeg, allorbits(:,3), 'Location', 'eastoutside');
